@@ -333,6 +333,11 @@ struct raopplay_data {
 	const char *uri;
 	int sock;
 	int playing;
+	union {
+		struct sockaddr sa;
+		struct sockaddr_un un;
+	} peer;
+	int peerlen;
 };
 
 static inline GQuark
@@ -347,11 +352,11 @@ raopplay_output_init(const struct config_param *param,
 {
 	struct raopplay_data *rpd;
 	struct audio_output *fd;
-	int namelen, peerlen;
+	int namelen;
 	union {
 		struct sockaddr sa;
 		struct sockaddr_un un;
-	} name = { { 0, }, }, peer = { { 0, }, };
+	} name;
 
 	fd = fifo_output_init(param, error_r);
 	if (!fd)
@@ -392,17 +397,17 @@ raopplay_output_init(const struct config_param *param,
 	if (name.un.sun_path[0] == '@')
 		name.un.sun_path[0] = 0;
 
-	/* init peer */
-	peer.un.sun_family = AF_UNIX;
-	strcpy(peer.un.sun_path, rpd->uri);
-	peerlen = SUN_LEN(&peer.un);
-	if (peer.un.sun_path[0] == '@')
-		peer.un.sun_path[0] = 0;
+	/* init peer for use in sendto */
+	rpd->peer.un.sun_family = AF_UNIX;
+	strcpy(rpd->peer.un.sun_path, rpd->uri);
+	rpd->peerlen = SUN_LEN(&rpd->peer.un);
+	if (rpd->peer.un.sun_path[0] == '@')
+		rpd->peer.un.sun_path[0] = 0;
 
 	/* init raopplay */
 	rpd->playing = 0;
 	rpd->sock = socket_bind_connect(PF_UNIX, SOCK_DGRAM, 0,
-			&name.sa, namelen, &peer.sa, peerlen, error_r);
+			&name.sa, namelen, NULL, 0, error_r);
 
 	if (rpd->sock < 0)
 		goto fail_socket;
@@ -434,13 +439,14 @@ raopplay_output_open(struct audio_output *ao, struct audio_format *audio_format,
 	char buf[1024];
 
 	sprintf(buf, "play %s\n", rpd->fifo.path);
-	if (send(rpd->sock, buf, strlen(buf), 0) < 0) {
+	if (sendto(rpd->sock, buf, strlen(buf), 0,
+				&rpd->peer.sa, rpd->peerlen) < 0) {
 		g_set_error(error, raopplay_output_quark(), errno,
 			    "send 'play %s' failed", rpd->fifo.path);
 		return false;
 	}
 	if (!fifo_output_open(ao, audio_format, error)) {
-		send(rpd->sock, "stop\n", 5, 0);
+		sendto(rpd->sock, "stop\n", 5, 0, &rpd->peer.sa, rpd->peerlen);
 		return false;
 	}
 	return true;
@@ -452,7 +458,7 @@ raopplay_output_close(struct audio_output *ao)
 	struct raopplay_data *rpd = (void *)ao;
 
 	fifo_output_close(ao);
-	send(rpd->sock, "stop\n", 5, 0);
+	sendto(rpd->sock, "stop\n", 5, 0, &rpd->peer.sa, rpd->peerlen);
 }
 
 const struct audio_output_plugin raopplay_output_plugin = {
