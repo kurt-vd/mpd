@@ -51,6 +51,12 @@ socket_bind_listen(int domain, int type, int protocol,
 		   GError **error);
 
 int
+socket_bind_connect(int domain, int type, int protocol,
+		   const struct sockaddr *name, size_t namelen,
+		   const struct sockaddr *peer, size_t peerlen,
+		   GError **error);
+
+int
 socket_keepalive(int fd);
 
 #endif

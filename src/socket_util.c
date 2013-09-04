@@ -98,3 +98,48 @@ socket_keepalive(int fd)
 	return setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE,
 			  (const char *)&reuse, sizeof(reuse));
 }
+
+static GQuark
+connect_quark(void)
+{
+	return g_quark_from_static_string("connect");
+}
+
+int
+socket_bind_connect(int domain, int type, int protocol,
+		   const struct sockaddr *name, size_t namelen,
+		   const struct sockaddr *peer, size_t peerlen,
+		   GError **error)
+{
+	int fd;
+	const int reuse = 1;
+
+	fd = socket_cloexec_nonblock(domain, type, protocol);
+	if (fd < 0) {
+		g_set_error(error, connect_quark(), errno,
+			    "Failed to create socket: %s", g_strerror(errno));
+		return -1;
+	}
+
+	/* IP sockets can do autobind ..., test for name*/
+	if (name && namelen && (bind(fd, name, namelen) < 0)) {
+		g_set_error(error, connect_quark(), errno,
+			    "bind() failed: %s", g_strerror(errno));
+		close_socket(fd);
+		return -1;
+	}
+
+	if (peer && peerlen && (connect(fd, peer, peerlen) < 0)) {
+		g_set_error(error, connect_quark(), errno,
+			    "connect() failed: %s", g_strerror(errno));
+		close_socket(fd);
+		return -1;
+	}
+
+#ifdef HAVE_STRUCT_UCRED
+	setsockopt(fd, SOL_SOCKET, SO_PASSCRED,
+		   (const char *) &reuse, sizeof(reuse));
+#endif
+
+	return fd;
+}
