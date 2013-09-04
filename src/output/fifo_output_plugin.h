@@ -21,5 +21,6 @@
 #define MPD_FIFO_OUTPUT_PLUGIN_H
 
 extern const struct audio_output_plugin fifo_output_plugin;
+extern const struct audio_output_plugin raopplay_output_plugin;
 
 #endif

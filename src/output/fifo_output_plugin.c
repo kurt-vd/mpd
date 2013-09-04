@@ -23,6 +23,7 @@
 #include "utils.h"
 #include "timer.h"
 #include "fd_util.h"
+#include "socket_util.h"
 #include "open.h"
 
 #include <glib.h>
@@ -31,7 +32,16 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <string.h>
+#include <stdio.h>
 #include <unistd.h>
+
+#ifndef G_OS_WIN32
+#include <sys/socket.h>
+#include <sys/un.h>
+#else /* G_OS_WIN32 */
+#include <ws2tcpip.h>
+#include <winsock.h>
+#endif /* G_OS_WIN32 */
 
 #undef G_LOG_DOMAIN
 #define G_LOG_DOMAIN "fifo"
@@ -309,6 +319,148 @@ const struct audio_output_plugin fifo_output_plugin = {
 	.finish = fifo_output_finish,
 	.open = fifo_output_open,
 	.close = fifo_output_close,
+	.delay = fifo_output_delay,
+	.play = fifo_output_play,
+	.cancel = fifo_output_cancel,
+};
+
+/* fifo to raop_play */
+#undef G_LOG_DOMAIN
+#define G_LOG_DOMAIN "raopplay"
+
+struct raopplay_data {
+	struct fifo_data fifo;
+	const char *uri;
+	int sock;
+	int playing;
+};
+
+static inline GQuark
+raopplay_output_quark(void)
+{
+	return g_quark_from_static_string("raopplay_output");
+}
+
+static struct audio_output *
+raopplay_output_init(const struct config_param *param,
+		 GError **error_r)
+{
+	struct raopplay_data *rpd;
+	struct audio_output *fd;
+	int namelen, peerlen;
+	union {
+		struct sockaddr sa;
+		struct sockaddr_un un;
+	} name = { { 0, }, }, peer = { { 0, }, };
+
+	fd = fifo_output_init(param, error_r);
+	if (!fd)
+		return NULL;
+
+	/*
+	 * dirty stuff:
+	 * - allocate a new data structure,
+	 * - copy the already initialized data
+	 * - free the already initialized data
+	 * - modify a member in the copied data
+	 * and yet it works for now.
+	 */
+	rpd = g_new(struct raopplay_data, 1);
+	if (!rpd) {
+		g_set_error(error_r, raopplay_output_quark(), 0,
+			    "No \"uri\" parameter specified");
+		goto fail_realloc;
+	}
+	rpd->fifo = *(struct fifo_data *)fd;
+	g_free(fd);
+	/* overrule functions */
+	rpd->fifo.base.plugin = &raopplay_output_plugin;
+	/* re-assign fd */
+	fd = &rpd->fifo.base;
+
+	rpd->uri = config_get_block_string(param, "uri", "@raopplayctl");
+	if (!rpd->uri) {
+		if (!*error_r)
+			g_set_error(error_r, raopplay_output_quark(), 0,
+				    "No \"uri\" parameter specified");
+		goto fail_uri;
+	}
+	/* init name */
+	name.un.sun_family = AF_UNIX;
+	sprintf(name.un.sun_path, "@raopplayctl-%i-mpd", getpid());
+	namelen = SUN_LEN(&name.un);
+	if (name.un.sun_path[0] == '@')
+		name.un.sun_path[0] = 0;
+
+	/* init peer */
+	peer.un.sun_family = AF_UNIX;
+	strcpy(peer.un.sun_path, rpd->uri);
+	peerlen = SUN_LEN(&peer.un);
+	if (peer.un.sun_path[0] == '@')
+		peer.un.sun_path[0] = 0;
+
+	/* init raopplay */
+	rpd->playing = 0;
+	rpd->sock = socket_bind_connect(PF_UNIX, SOCK_DGRAM, 0,
+			&name.sa, namelen, &peer.sa, peerlen, error_r);
+
+	if (rpd->sock < 0)
+		goto fail_socket;
+
+	return &rpd->fifo.base;
+
+fail_socket:
+fail_uri:
+fail_realloc:
+	fifo_output_finish(fd);
+	return NULL;
+}
+
+static void
+raopplay_output_finish(struct audio_output *ao)
+{
+	struct raopplay_data *rpd = (void *)ao;
+
+	/* destruct */
+	close_socket(rpd->sock);
+	fifo_output_finish(ao);
+}
+
+static bool
+raopplay_output_open(struct audio_output *ao, struct audio_format *audio_format,
+		 G_GNUC_UNUSED GError **error)
+{
+	struct raopplay_data *rpd = (void *)ao;
+	char buf[1024];
+
+	sprintf(buf, "play %s\n", rpd->fifo.path);
+	if (send(rpd->sock, buf, strlen(buf), 0) < 0) {
+		g_set_error(error, raopplay_output_quark(), errno,
+			    "send 'play %s' failed", rpd->fifo.path);
+		return false;
+	}
+	if (!fifo_output_open(ao, audio_format, error)) {
+		send(rpd->sock, "stop\n", 5, 0);
+		return false;
+	}
+	return true;
+}
+
+static void
+raopplay_output_close(struct audio_output *ao)
+{
+	struct raopplay_data *rpd = (void *)ao;
+
+	fifo_output_close(ao);
+	send(rpd->sock, "stop\n", 5, 0);
+}
+
+const struct audio_output_plugin raopplay_output_plugin = {
+	.name = "raopplay",
+	.init = raopplay_output_init,
+	.finish = raopplay_output_finish,
+	.open = raopplay_output_open,
+	.close = raopplay_output_close,
 	.delay = fifo_output_delay,
 	.play = fifo_output_play,
 	.cancel = fifo_output_cancel,

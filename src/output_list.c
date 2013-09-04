@@ -46,6 +46,7 @@ const struct audio_output_plugin *const audio_output_plugins[] = {
 	&null_output_plugin,
 #ifdef HAVE_FIFO
 	&fifo_output_plugin,
+	&raopplay_output_plugin,
 #endif
 #ifdef ENABLE_PIPE_OUTPUT
 	&pipe_output_plugin,
